@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Camera, Zap, Activity, Sun, Moon } from 'lucide-react';
+import { Camera, Zap, Activity, Sun, Moon, MapPin } from 'lucide-react';
 
 export default function HomePage() {
   const [darkMode, setDarkMode] = useState(true);
@@ -82,6 +82,32 @@ export default function HomePage() {
             </div>
           </Link>
 
+          {/* Supercharger Map Card */}
+          <Link href="/supercharger" className="group relative">
+            <div className="absolute -inset-0.5 bg-gradient-to-r from-red-600 to-zinc-600 rounded-2xl blur opacity-20 transition duration-500"></div>
+            <div className="relative h-full bg-white dark:bg-[#313438] border border-gray-200 dark:border-[#42454a] rounded-xl p-8 hover:bg-gray-50 dark:hover:bg-[#3a3d42] transition-all duration-300 flex flex-col shadow-sm dark:shadow-none">
+              <div className="flex items-start justify-between mb-6">
+                <div className="p-3 bg-gray-100 dark:bg-[#232629]/50 rounded-xl border border-gray-200 dark:border-[#42454a] transition-colors">
+                  <MapPin className="w-8 h-8 text-red-500" />
+                </div>
+                <div className="px-2 py-1 bg-gray-100 dark:bg-[#232629] rounded text-[10px] font-mono text-gray-500 dark:text-zinc-500 border border-gray-200 dark:border-[#42454a]">
+                  v1.0
+                </div>
+              </div>
+              
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-3 transition-colors">
+                超充踩點地圖
+              </h2>
+              <p className="text-gray-600 dark:text-zinc-400 text-sm leading-relaxed mb-6 flex-1">
+                記錄您踩點過的 Tesla 超級充電站，支援城市篩選、進度追蹤、時間優先路線規劃與 Google Maps 導航整合。
+              </p>
+
+              <div className="flex items-center text-sm text-red-500 font-medium transition-transform">
+                開啟工具 <span className="ml-1">→</span>
+              </div>
+            </div>
+          </Link>
+
           {/* Placeholder Card 1 */}
           <div className="group relative opacity-50 cursor-not-allowed">
             <div className="relative h-full bg-white dark:bg-[#313438] border border-gray-200 dark:border-[#42454a] rounded-xl p-8 flex flex-col border-dashed">
@@ -99,27 +125,6 @@ export default function HomePage() {
               </h2>
               <p className="text-gray-400 dark:text-zinc-600 text-sm leading-relaxed mb-6 flex-1">
                 分析充電效率、成本估算與電池健康度監控工具。（開發中）
-              </p>
-            </div>
-          </div>
-
-          {/* Placeholder Card 2 */}
-          <div className="group relative opacity-50 cursor-not-allowed">
-            <div className="relative h-full bg-white dark:bg-[#313438] border border-gray-200 dark:border-[#42454a] rounded-xl p-8 flex flex-col border-dashed">
-              <div className="flex items-start justify-between mb-6">
-                <div className="p-3 bg-gray-100 dark:bg-[#232629]/50 rounded-xl border border-gray-200 dark:border-[#42454a]">
-                  <Activity className="w-8 h-8 text-gray-400 dark:text-zinc-600" />
-                </div>
-                <div className="px-2 py-1 bg-gray-100 dark:bg-[#232629] rounded text-[10px] font-mono text-gray-400 dark:text-zinc-600 border border-gray-200 dark:border-[#42454a]">
-                  Coming Soon
-                </div>
-              </div>
-              
-              <h2 className="text-2xl font-bold text-gray-400 dark:text-zinc-500 mb-3">
-                行程統計
-              </h2>
-              <p className="text-gray-400 dark:text-zinc-600 text-sm leading-relaxed mb-6 flex-1">
-                詳細的行程記錄統計，包含能耗分析與駕駛評分。（開發中）
               </p>
             </div>
           </div>
