@@ -921,7 +921,7 @@ export default function TeslaSentryViewer() {
       <div className={`flex-col h-full relative bg-gray-50 dark:bg-[#232629]
           ${!showMobileList ? 'flex w-full' : 'hidden'} 
           md:flex md:flex-1 transition-colors duration-300`}>
-
+ 
         {!selectedEvent ? (
           <div className="flex-1 flex flex-col items-center justify-center text-gray-400 dark:text-zinc-600">
             <Video size={64} className="mb-4 opacity-20" />
