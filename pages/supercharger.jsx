@@ -2,9 +2,11 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
+import { formatDateTime } from '../utils/datetime';
 
 const APP_KEY = 'tesla_tracker_v3';
 const HISTORY_KEY = 'tesla_map_history';
+const GOOGLE_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY; // 請填入您的 Google Maps API Key
 
 // Dynamically import Leaflet to avoid SSR issues
 const MapContainer = dynamic(
@@ -33,7 +35,10 @@ export default function Supercharger() {
     const [selectedStationIds, setSelectedStationIds] = useState(new Set());
     const [routeStartCoords, setRouteStartCoords] = useState(null);
     const [routeEndCoords, setRouteEndCoords] = useState(null);
+    const [startLocationInfo, setStartLocationInfo] = useState(null);
+    const [endLocationInfo, setEndLocationInfo] = useState(null);
     const [mapPickTarget, setMapPickTarget] = useState(null);
+    const [tempPickedCoords, setTempPickedCoords] = useState(null);
 
     const [cityFilterNormal, setCityFilterNormal] = useState('');
     const [hideVisitedNormal, setHideVisitedNormal] = useState(false);
@@ -45,19 +50,57 @@ export default function Supercharger() {
     const [resultModalOpen, setResultModalOpen] = useState(false);
     const [historyModalOpen, setHistoryModalOpen] = useState(false);
     const [routeResult, setRouteResult] = useState([]);
+    const [finalTravelTime, setFinalTravelTime] = useState(0);
     const [historyList, setHistoryList] = useState([]);
     const [loading, setLoading] = useState(false);
 
     const [startInputVal, setStartInputVal] = useState('');
     const [endInputVal, setEndInputVal] = useState('');
+    const [flyToCoords, setFlyToCoords] = useState(null);
+    const [userLocation, setUserLocation] = useState(null);
+    const [toastMsg, setToastMsg] = useState('');
+
+    const [startSuggestions, setStartSuggestions] = useState([]);
+    const [endSuggestions, setEndSuggestions] = useState([]);
+    const startSearchTimeoutRef = useRef(null);
+    const endSearchTimeoutRef = useRef(null);
 
     const mapRef = useRef(null);
+
+    // Load Google Maps Script
+    useEffect(() => {
+        if (!GOOGLE_API_KEY) return;
+        if (window.google && window.google.maps) return;
+
+        const script = document.createElement('script');
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_API_KEY}&libraries=places`;
+        script.async = true;
+        script.defer = true;
+        document.head.appendChild(script);
+    }, []);
+
+    // Toast timer
+    useEffect(() => {
+        if (toastMsg) {
+            const timer = setTimeout(() => setToastMsg(''), 5000);
+            return () => clearTimeout(timer);
+        }
+    }, [toastMsg]);
+
+    // Check API Key
+    useEffect(() => {
+        if (!GOOGLE_API_KEY) {
+            setToastMsg("請於程式碼中設定 Google Maps API Key 以啟用完整功能 (自動完成、地址轉換)");
+        }
+    }, []);
 
     // Check if visited this year
     const isVisitedThisYear = useCallback((id) => {
         if (typeof window === 'undefined') return false;
         const v = JSON.parse(localStorage.getItem(APP_KEY) || '{}');
-        return v[id] && new Date(v[id]).getFullYear() === new Date().getFullYear();
+        const d = new Date(v[id])
+        if (v[id] && d.getFullYear() === new Date().getFullYear())
+            return d;
     }, []);
 
     // Visited stats
@@ -83,12 +126,12 @@ export default function Supercharger() {
         ];
 
         const cityMap = {
-            "Taipei": "台北市", "New Taipei": "新北市", "Keelung": "基隆市",
-            "Yilan": "宜蘭縣", "Hualien": "花蓮縣", "Taitung": "台東縣",
-            "Pingtung": "屏東縣", "Kaohsiung": "高雄市", "Tainan": "台南市",
-            "Chiayi": "嘉義", "Yunlin": "雲林縣",
-            "Nantou": "南投縣", "Changhua": "彰化縣", "Taichung": "台中市",
-            "Miaoli": "苗栗縣", "Hsinchu": "新竹", "Taoyuan": "桃園市"
+            "Taipei": "台北", "New Taipei": "新北", "Keelung": "基隆",
+            "Yilan": "宜蘭", "Hualien": "花蓮", "Taitung": "台東",
+            "Pingtung": "屏東", "Kaohsiung": "高雄", "Tainan": "台南",
+            "Chiayi": "嘉義", "Yunlin": "雲林",
+            "Nantou": "南投", "Changhua": "彰化", "Taichung": "台中",
+            "Miaoli": "苗栗", "Hsinchu": "新竹", "Taoyuan": "桃園"
         };
 
         uniqueCities.sort((a, b) => {
@@ -107,7 +150,7 @@ export default function Supercharger() {
             const displayName = cityMap[city] || city;
             return {
                 value: city,
-                label: `${displayName} (${visited}/${total})`
+                label: `${displayName} （${visited} / ${total}）`
             };
         });
     }, [allStations, isVisitedThisYear]);
@@ -127,7 +170,10 @@ export default function Supercharger() {
     // Google Maps links
     const googleMapsLinks = useMemo(() => {
         if (!routeResult.length) return [];
-        const allPoints = [routeStartCoords, ...routeResult];
+        const allPoints = [routeStartCoords, ...routeResult].filter(p => p);
+        if (routeEndCoords) {
+            allPoints.push(routeEndCoords);
+        }
         const chunkSize = 9;
         const links = [];
         const totalLinks = Math.ceil((allPoints.length - 1) / chunkSize);
@@ -155,7 +201,7 @@ export default function Supercharger() {
             });
         }
         return links;
-    }, [routeResult, routeStartCoords]);
+    }, [routeResult, routeStartCoords, routeEndCoords]);
 
     // Fetch stations
     useEffect(() => {
@@ -180,6 +226,20 @@ export default function Supercharger() {
             }
         };
         fetchStations();
+
+        // Watch user location
+        if (navigator.geolocation) {
+            const watchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+                },
+                (err) => {
+                    console.error("Location watch error:", err);
+                },
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+            );
+            return () => navigator.geolocation.clearWatch(watchId);
+        }
     }, []);
 
     // Update input values when coords change
@@ -199,28 +259,95 @@ export default function Supercharger() {
         }
     }, [routeEndCoords]);
 
+    // Fetch suggestions
+    const fetchSuggestions = async (query, setSuggestions) => {
+        if (!query || query.length < 2) {
+            setSuggestions([]);
+            return;
+        }
+
+        if (window.google && window.google.maps) {
+            const service = new window.google.maps.places.AutocompleteService();
+            service.getPlacePredictions({ input: query, componentRestrictions: { country: 'tw' } }, (predictions, status) => {
+                if (status === window.google.maps.places.PlacesServiceStatus.OK && predictions) {
+                    setSuggestions(predictions);
+                } else {
+                    setSuggestions([]);
+                }
+            });
+            return;
+        }
+
+        // Fallback to Nominatim if Google API is not loaded
+        try {
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`, {
+                headers: { 'Accept-Language': 'zh-TW' }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setSuggestions(data);
+            }
+        } catch (e) {
+            console.error("Suggestion fetch failed", e);
+        }
+    };
+
     // Handle start input change
     const handleStartInputChange = (val) => {
         setStartInputVal(val);
-        const parts = val.split(',').map(p => parseFloat(p.trim()));
-        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            setRouteStartCoords({ lat: parts[0], lng: parts[1] });
-        }
+        if (startSearchTimeoutRef.current) clearTimeout(startSearchTimeoutRef.current);
+        startSearchTimeoutRef.current = setTimeout(() => {
+            fetchSuggestions(val, setStartSuggestions);
+        }, 500);
     };
 
     // Handle end input change
     const handleEndInputChange = (val) => {
         setEndInputVal(val);
-        const parts = val.split(',').map(p => parseFloat(p.trim()));
-        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            setRouteEndCoords({ lat: parts[0], lng: parts[1] });
+        if (endSearchTimeoutRef.current) clearTimeout(endSearchTimeoutRef.current);
+        endSearchTimeoutRef.current = setTimeout(() => {
+            fetchSuggestions(val, setEndSuggestions);
+        }, 500);
+    };
+
+    // Select suggestion
+    const selectSuggestion = (item, type) => {
+        if (item.place_id && window.google && window.google.maps) {
+            const geocoder = new window.google.maps.Geocoder();
+            geocoder.geocode({ placeId: item.place_id }, (results, status) => {
+                if (status === 'OK' && results[0]) {
+                    const location = results[0].geometry.location;
+                    const lat = location.lat();
+                    const lng = location.lng();
+                    if (type === 'start') {
+                        setRouteStartCoords({ lat, lng });
+                        setStartSuggestions([]);
+                    } else {
+                        setRouteEndCoords({ lat, lng });
+                        setEndSuggestions([]);
+                    }
+                }
+            });
+            return;
+        }
+
+        const lat = parseFloat(item.lat);
+        const lng = parseFloat(item.lon);
+        if (type === 'start') {
+            setRouteStartCoords({ lat, lng });
+            setStartSuggestions([]);
+        } else {
+            setRouteEndCoords({ lat, lng });
+            setEndSuggestions([]);
         }
     };
 
     // Toggle route mode
     const toggleRouteMode = (val) => {
         setIsPlanningMode(val);
-        if (!val) {
+        if (val) {
+            setDetailModalOpen(false);
+        } else {
             setSelectedStationIds(new Set());
         }
     };
@@ -270,32 +397,176 @@ export default function Supercharger() {
         setSelectedStationIds(newSet);
     };
 
-    // Use current location
-    const useCurrentLocation = (target) => {
-        if (!navigator.geolocation) {
-            alert("瀏覽器不支援定位");
-            return;
+
+
+    // Get address from coords
+    const getAddress = async (lat, lng) => {
+        if (window.google && window.google.maps) {
+            return new Promise((resolve) => {
+                const geocoder = new window.google.maps.Geocoder();
+                geocoder.geocode({ location: { lat, lng } }, (results, status) => {
+                    if (status === 'OK' && results[0]) {
+                        resolve(results[0].formatted_address);
+                    } else {
+                        resolve("地址查詢失敗");
+                    }
+                });
+            });
         }
-        navigator.geolocation.getCurrentPosition((pos) => {
-            const latlng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-            if (target === 'start') setRouteStartCoords(latlng);
-            else setRouteEndCoords(latlng);
-        });
+
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超時
+
+            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`, {
+                signal: controller.signal,
+                headers: {
+                    'Accept-Language': 'zh-TW'
+                }
+            });
+            clearTimeout(timeoutId);
+
+            if (!res.ok) throw new Error('Network response was not ok');
+
+            const data = await res.json();
+            return data.display_name || "未知地址";
+        } catch (e) {
+            console.error("Address fetch failed:", e);
+            return "地址查詢失敗";
+        }
+    };
+
+    // Get coords from address/keyword
+    const getCoordsFromAddress = async (query) => {
+        if (window.google && window.google.maps) {
+            return new Promise((resolve) => {
+                const geocoder = new window.google.maps.Geocoder();
+                geocoder.geocode({ address: query }, (results, status) => {
+                    if (status === 'OK' && results[0]) {
+                        const loc = results[0].geometry.location;
+                        resolve({ lat: loc.lat(), lng: loc.lng() });
+                    } else {
+                        resolve(null);
+                    }
+                });
+            });
+        }
+
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`, {
+                signal: controller.signal,
+                headers: {
+                    'Accept-Language': 'zh-TW'
+                }
+            });
+            clearTimeout(timeoutId);
+
+            if (!res.ok) throw new Error('Network response was not ok');
+
+            const data = await res.json();
+            if (data && data.length > 0) {
+                return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+            }
+            return null;
+        } catch (e) {
+            console.error("Geocoding failed:", e);
+            return null;
+        }
     };
 
     // Calculate route
     const calculateRoute = async () => {
-        if (!routeStartCoords || selectedStationIds.size === 0) {
-            alert("請檢查起點座標與站點選擇。");
-            return;
-        }
-
         setLoading(true);
         try {
+            const parseCoords = (val) => {
+                if (!val) return null;
+                const parts = val.split(',').map(p => parseFloat(p.trim()));
+                if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+                    return { lat: parts[0], lng: parts[1] };
+                }
+                return null;
+            };
+
+            let startCoords = parseCoords(startInputVal);
+            if (startInputVal && !startCoords) {
+                const result = await getCoordsFromAddress(startInputVal);
+                if (result) {
+                    startCoords = result;
+                } else {
+                    throw new Error("無法找到起點位置，請確認輸入的地址或座標是否正確");
+                }
+            }
+            if (startCoords) {
+                setRouteStartCoords(startCoords);
+            }
+
+            // 1. Handle Start
+            if (!startCoords) {
+                if (!navigator.geolocation) {
+                    setToastMsg("瀏覽器不支援定位，請手動輸入起點");
+                    setLoading(false);
+                    return;
+                }
+                try {
+                    const pos = await new Promise((resolve, reject) => {
+                        navigator.geolocation.getCurrentPosition(resolve, reject, {
+                            enableHighAccuracy: false, // 降低精度要求以加快速度
+                            timeout: 10000, // 10秒超時
+                            maximumAge: 60000 // 可接受1分鐘內的快取
+                        });
+                    });
+                    startCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                    setRouteStartCoords(startCoords);
+                } catch (err) {
+                    console.error(err);
+                    setToastMsg("無法獲取定位，請確認已允許定位權限或手動輸入起點");
+                    setLoading(false);
+                    return;
+                }
+            }
+
+            // 2. Handle End
+            let endCoords = parseCoords(endInputVal);
+            if (endInputVal && !endCoords) {
+                const result = await getCoordsFromAddress(endInputVal);
+                if (result) {
+                    endCoords = result;
+                } else {
+                    throw new Error("無法找到終點位置，請確認輸入的地址或座標是否正確");
+                }
+            }
+            if (endCoords) {
+                setRouteEndCoords(endCoords);
+            }
+
+            if (!endCoords) {
+                endCoords = startCoords;
+                setRouteEndCoords(endCoords);
+            }
+
+            if (selectedStationIds.size === 0) {
+                throw new Error("請選擇至少一個站點");
+            }
+
+            // 3. Get Addresses (Parallel execution to save time)
+            const [startAddr, endAddr] = await Promise.all([
+                getAddress(startCoords.lat, startCoords.lng),
+                getAddress(endCoords.lat, endCoords.lng)
+            ]);
+
+            setStartLocationInfo({ ...startCoords, address: startAddr });
+            setEndLocationInfo({ ...endCoords, address: endAddr });
+
+            const startInfo = { ...startCoords, address: startAddr };
+            const endInfo = { ...endCoords, address: endAddr };
+
             let currentStationIdx = -1;
             let minDst = Infinity;
             allStations.forEach((s, i) => {
-                const d = (s.lat - routeStartCoords.lat) ** 2 + (s.lng - routeStartCoords.lng) ** 2;
+                const d = (s.lat - startCoords.lat) ** 2 + (s.lng - startCoords.lng) ** 2;
                 if (d < minDst) {
                     minDst = d;
                     currentStationIdx = i;
@@ -323,30 +594,59 @@ export default function Supercharger() {
                 if (bestNodeIdx === -1) break;
 
                 const nextNode = nodes[bestNodeIdx];
-                routeOrder.push({ ...nextNode, travelTime: `${Math.round(minTime)} 分鐘` });
+                routeOrder.push({ ...nextNode, travelTime: Math.round(minTime) });
 
                 currentStationIdx = allStations.indexOf(nextNode);
                 nodes.splice(bestNodeIdx, 1);
             }
 
-            saveRouteToHistory(routeOrder);
+            // Calculate final leg time
+            if (currentStationIdx !== -1 && endCoords) {
+                const lastStation = allStations[currentStationIdx];
+                const dist = getDistanceFromLatLonInKm(lastStation.lat, lastStation.lng, endCoords.lat, endCoords.lng);
+                const time = (dist / 50) * 60; // Assume 50km/h average speed
+                setFinalTravelTime(Math.round(time));
+            } else {
+                setFinalTravelTime(0);
+            }
+
+            saveRouteToHistory(routeOrder, startInfo, endInfo);
             setRouteResult(routeOrder);
             setResultModalOpen(true);
         } catch (err) {
-            alert("運算失敗：" + err.message);
+            setToastMsg("運算失敗：" + err.message);
             console.error(err);
         } finally {
             setLoading(false);
         }
     };
 
+    function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+        var R = 6371; // Radius of the earth in km
+        var dLat = deg2rad(lat2 - lat1);
+        var dLon = deg2rad(lon2 - lon1);
+        var a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+            ;
+        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        var d = R * c; // Distance in km
+        return d;
+    }
+
+    function deg2rad(deg) {
+        return deg * (Math.PI / 180)
+    }
+
     // Save route to history
-    const saveRouteToHistory = (routeOrder) => {
+    const saveRouteToHistory = (routeOrder, startInfo, endInfo) => {
         const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
         const newItem = {
             id: Date.now(),
             date: new Date().toLocaleString(),
-            start: routeStartCoords,
+            start: startInfo,
+            end: endInfo,
             stations: routeOrder
         };
         history.unshift(newItem);
@@ -371,26 +671,80 @@ export default function Supercharger() {
 
     // Load history route
     const loadHistoryRoute = (item) => {
-        setRouteStartCoords(item.start);
-        setRouteResult(item.stations);
+        if (item.start) {
+            setRouteStartCoords(item.start);
+            setStartLocationInfo(item.start);
+        } else {
+            setRouteStartCoords(null);
+            setStartLocationInfo(null);
+        }
+
+        if (item.end) {
+            setRouteEndCoords(item.end);
+            setEndLocationInfo(item.end);
+        } else {
+            setRouteEndCoords(item.start || null);
+            setEndLocationInfo(item.start || null);
+        }
+
+        setRouteResult(item.stations || []);
         setResultModalOpen(true);
         setHistoryModalOpen(false);
+    };
+
+    // Handle GPS click
+    const handleGPSClick = () => {
+        if (userLocation) {
+            setFlyToCoords({ ...userLocation, ts: Date.now() });
+            return;
+        }
+
+        if (!navigator.geolocation) {
+            setToastMsg("瀏覽器不支援定位");
+            return;
+        }
+        navigator.geolocation.getCurrentPosition((pos) => {
+            const latlng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+            setFlyToCoords({ ...latlng, ts: Date.now() });
+        }, (err) => {
+            setToastMsg("無法取得定位: " + err.message);
+        });
     };
 
     // Handle map click
     const handleMapClick = (e) => {
         if (mapPickTarget) {
             const latlng = { lat: e.latlng.lat, lng: e.latlng.lng };
-            if (mapPickTarget === 'start') setRouteStartCoords(latlng);
-            else setRouteEndCoords(latlng);
-            setMapPickTarget(null);
+            setTempPickedCoords(latlng);
+        } else {
+            setDetailModalOpen(false);
         }
+    };
+
+    // Confirm map pick
+    const confirmMapPick = () => {
+        if (mapPickTarget && tempPickedCoords) {
+            if (mapPickTarget === 'start') {
+                setRouteStartCoords(tempPickedCoords);
+            } else {
+                setRouteEndCoords(tempPickedCoords);
+            }
+            setMapPickTarget(null);
+            setTempPickedCoords(null);
+        }
+    };
+
+    // Cancel map pick
+    const cancelMapPick = () => {
+        setMapPickTarget(null);
+        setTempPickedCoords(null);
     };
 
     // Handle marker click
     const handleMarkerClick = (station) => {
         if (isPlanningMode) {
             toggleStationSelection(station.id);
+            openDetailModal(station);
         } else {
             openDetailModal(station);
         }
@@ -412,7 +766,8 @@ export default function Supercharger() {
                 .pin {
                 width: 30px; height: 30px; border-radius: 50% 50% 50% 0;
                 background: #000; position: absolute; transform: rotate(-45deg);
-                left: 50%; top: 50%; margin: -15px 0 0 -15px;
+                transform-origin: 0% 100%;
+                left: 50%; top: 100%; margin-top: -30px;
                 box-shadow: 0 3px 5px rgba(0,0,0,0.3); border: 2px solid white;
                 transition: all 0.2s ease;
                 }
@@ -422,7 +777,23 @@ export default function Supercharger() {
                 }
                 .pin.visited { background: #cc0000; z-index: 10; }
                 .pin.selected { background: #2563eb !important; transform: scale(1.2) rotate(-45deg); z-index: 20; border-color: #fbbf24; }
-                .cursor-crosshair { cursor: crosshair !important; }
+                .pin.current { transform: scale(1.3) rotate(-45deg); z-index: 30; box-shadow: 0 0 10px 4px rgba(128, 128, 128, 0.6); }
+                .pin .warning-icon {
+                    position: absolute;
+                    right: -8px; top: 4px;
+                    width: 16px; height: 16px;
+                    border-radius: 50%;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    transform: rotate(45deg);
+                    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+                }
+                .pin .warning-icon i {
+                    color: #f59e0b;
+                    font-size: 16px;
+                }
+                .cursor-crosshair, .cursor-crosshair .leaflet-interactive, .cursor-crosshair .leaflet-grab { cursor: crosshair !important; }
             `}</style>
 
             <div className="bg-gray-100">
@@ -441,7 +812,7 @@ export default function Supercharger() {
                                     </h1>
                                 </Link>
                                 <p className="text-xs text-gray-500">
-                                    今年進度: <span className="font-bold text-red-600">{visitedStats.count}</span> / <span>{visitedStats.total}</span>
+                                    今年進度：<span className="font-bold text-red-600">{visitedStats.count}</span> / <span>{visitedStats.total}</span>
                                 </p>
                             </div>
                             <button
@@ -462,7 +833,7 @@ export default function Supercharger() {
                                 onChange={(e) => setCityFilterNormal(e.target.value)}
                                 className="border rounded px-2 py-1 bg-white text-gray-700 flex-1"
                             >
-                                <option value="">全台灣</option>
+                                <option value="">所有縣市</option>
                                 {cities.map(c => (
                                     <option key={c.value} value={c.value}>{c.label}</option>
                                 ))}
@@ -488,7 +859,7 @@ export default function Supercharger() {
                     <div className="bg-white/95 backdrop-blur shadow-lg p-3 rounded-xl border-2 border-blue-500 w-full max-w-2xl pointer-events-auto">
                         <div className="flex justify-between items-center mb-3 border-b pb-2">
                             <h2 className="font-bold text-blue-800">
-                                <i className="fa-solid fa-map-location-dot mr-1"></i> 時間優先規劃模式
+                                <i className="fa-solid fa-map-location-dot mr-1"></i> 路線規劃
                             </h2>
                             <div className="flex gap-2">
                                 <button onClick={openHistoryModal} className="text-blue-600 text-sm hover:text-blue-800 px-2">
@@ -507,7 +878,7 @@ export default function Supercharger() {
                                 onChange={(e) => setCityFilterPlanner(e.target.value)}
                                 className="border rounded px-2 py-1 bg-white text-gray-700 flex-1"
                             >
-                                <option value="">全台灣</option>
+                                <option value="">全部縣市</option>
                                 {cities.map(c => (
                                     <option key={c.value} value={c.value}>{c.label}</option>
                                 ))}
@@ -533,21 +904,36 @@ export default function Supercharger() {
                                 <input
                                     value={startInputVal}
                                     onChange={(e) => handleStartInputChange(e.target.value)}
+                                    onBlur={() => setTimeout(() => setStartSuggestions([]), 200)}
                                     type="text"
-                                    placeholder="起點 (可手動輸入 Lat, Lng)"
+                                    placeholder="起點 （預設目前位置）"
                                     className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm outline-none"
                                 />
+                                {startSuggestions.length > 0 && (
+                                    <ul className="absolute top-full left-8 right-10 bg-white border border-gray-200 rounded-b-lg shadow-lg z-[2000] max-h-60 overflow-y-auto">
+                                        {startSuggestions.map((item, idx) => (
+                                            <li
+                                                key={idx}
+                                                onClick={() => selectSuggestion(item, 'start')}
+                                                className="px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm border-b last:border-b-0 text-gray-700 text-left"
+                                            >
+                                                <div className="font-bold truncate">{item.description || item.display_name.split(',')[0]}</div>
+                                                <div className="text-xs text-gray-500 truncate">{item.description || item.display_name}</div>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
                                 <button
-                                    onClick={() => useCurrentLocation('start')}
+                                    onClick={() => { setRouteStartCoords(null); setStartInputVal(''); }}
                                     className="text-gray-500 hover:text-blue-600 p-2"
-                                    title="使用當前位置"
+                                    title="使用目前位置"
                                 >
                                     <i className="fa-solid fa-crosshairs"></i>
                                 </button>
                                 <button
                                     onClick={() => setMapPickTarget('start')}
-                                    className="text-gray-500 hover:text-blue-600 p-2"
-                                    title="地圖選點"
+                                    className={`p-2 transition-colors ${mapPickTarget === 'start' ? 'text-blue-400' : 'text-gray-500 hover:text-blue-600'}`}
+                                    title="選擇地圖座標"
                                 >
                                     <i className="fa-solid fa-map-pin"></i>
                                 </button>
@@ -559,14 +945,36 @@ export default function Supercharger() {
                                 <input
                                     value={endInputVal}
                                     onChange={(e) => handleEndInputChange(e.target.value)}
+                                    onBlur={() => setTimeout(() => setEndSuggestions([]), 200)}
                                     type="text"
-                                    placeholder="終點 (預設同起點)"
+                                    placeholder="終點 （預設回到起點）"
                                     className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm outline-none"
                                 />
+                                {endSuggestions.length > 0 && (
+                                    <ul className="absolute top-full left-8 right-10 bg-white border border-gray-200 rounded-b-lg shadow-lg z-[2000] max-h-60 overflow-y-auto">
+                                        {endSuggestions.map((item, idx) => (
+                                            <li
+                                                key={idx}
+                                                onClick={() => selectSuggestion(item, 'end')}
+                                                className="px-3 py-2 hover:bg-blue-50 cursor-pointer text-sm border-b last:border-b-0 text-gray-700 text-left"
+                                            >
+                                                <div className="font-bold truncate">{item.description || item.display_name.split(',')[0]}</div>
+                                                <div className="text-xs text-gray-500 truncate">{item.description || item.display_name}</div>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                                <button
+                                    onClick={() => { setRouteEndCoords(null); setEndInputVal(''); }}
+                                    className="text-gray-500 hover:text-blue-600 p-2"
+                                    title="回到起點"
+                                >
+                                    <i className="fa-solid fa-rotate-left"></i>
+                                </button>
                                 <button
                                     onClick={() => setMapPickTarget('end')}
-                                    className="text-gray-500 hover:text-blue-600 p-2"
-                                    title="地圖選點"
+                                    className={`p-2 transition-colors ${mapPickTarget === 'end' ? 'text-blue-400' : 'text-gray-500 hover:text-blue-600'}`}
+                                    title="選擇地圖座標"
                                 >
                                     <i className="fa-solid fa-map-pin"></i>
                                 </button>
@@ -578,7 +986,7 @@ export default function Supercharger() {
                             disabled={loading}
                             className={`w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg shadow transition-colors flex justify-center items-center gap-2 ${loading ? 'opacity-50' : ''}`}
                         >
-                            <span>{loading ? "運算中..." : "計算最佳時間路線"}</span>
+                            <span>{loading ? "執行中..." : "開始規畫"}</span>
                             <span className="bg-white text-blue-600 text-xs px-1.5 py-0.5 rounded-full font-bold">
                                 {selectedStationIds.size}
                             </span>
@@ -587,11 +995,56 @@ export default function Supercharger() {
                 </div>
 
                 {/* Map Pick Toast */}
-                {mapPickTarget && (
+                {mapPickTarget && !tempPickedCoords && (
                     <div className="fixed top-20 left-1/2 transform -translate-x-1/2 bg-black/75 text-white px-4 py-2 rounded-full text-sm font-bold z-[2000] pointer-events-none">
                         <i className="fa-solid fa-crosshairs mr-2"></i> 請點擊地圖選擇位置
                     </div>
                 )}
+
+                {/* Map Pick Confirmation Modal */}
+                {mapPickTarget && tempPickedCoords && (
+                    <div className="fixed bottom-0 left-0 right-0 z-[2500] p-4 flex justify-center pointer-events-none">
+                        <div className="bg-white rounded-2xl shadow-2xl p-5 w-full max-w-md border border-gray-200 pointer-events-auto animate-slide-up">
+                            <div className="text-center mb-4">
+                                <h3 className="font-bold text-lg text-gray-800 mb-1">確認座標位置</h3>
+                                <p className="text-gray-600 font-mono text-lg">
+                                    {tempPickedCoords.lat.toFixed(5)}, {tempPickedCoords.lng.toFixed(5)}
+                                </p>
+                                <p className="text-xs text-gray-400 mt-1">您可以繼續點擊地圖以修正位置</p>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <button
+                                    onClick={cancelMapPick}
+                                    className="bg-gray-100 text-gray-700 py-3 rounded-xl font-bold hover:bg-gray-200 transition-colors"
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={confirmMapPick}
+                                    className="bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors"
+                                >
+                                    確認選擇
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* General Toast */}
+                {toastMsg && (
+                    <div className="fixed top-32 left-1/2 transform -translate-x-1/2 bg-black/75 text-white px-4 py-2 rounded-full text-sm font-bold z-[2000] pointer-events-none transition-opacity duration-300">
+                        <i className="fa-solid fa-circle-exclamation mr-2"></i> {toastMsg}
+                    </div>
+                )}
+
+                {/* GPS Button */}
+                <button
+                    onClick={handleGPSClick}
+                    className="fixed bottom-24 right-4 z-[1500] bg-white text-gray-700 p-3 rounded-full shadow-lg hover:bg-gray-100 transition-colors flex items-center justify-center w-12 h-12"
+                    title="定位到目前位置"
+                >
+                    <i className="fa-solid fa-location-crosshairs fa-lg"></i>
+                </button>
 
                 {/* Map */}
                 <MapComponent
@@ -602,13 +1055,17 @@ export default function Supercharger() {
                     onMarkerClick={handleMarkerClick}
                     onMapClick={handleMapClick}
                     mapPickTarget={mapPickTarget}
+                    tempPickedCoords={tempPickedCoords}
+                    flyToCoords={flyToCoords}
+                    userLocation={userLocation}
+                    currentStation={detailModalOpen ? currentStation : null}
                 />
 
                 {/* Detail Modal */}
                 <div
-                    className={`fixed bottom-0 left-0 right-0 z-[2000] transform transition-transform duration-300 ease-in-out ${detailModalOpen ? '' : 'translate-y-full'}`}
+                    className={`fixed bottom-0 left-0 right-0 z-[2000] transform transition-transform duration-300 ease-in-out ${detailModalOpen ? '' : 'translate-y-full'} pointer-events-none`}
                 >
-                    <div className="bg-white rounded-t-2xl shadow-2xl p-5 md:max-w-2xl md:mx-auto border-t border-gray-200 pb-8">
+                    <div className="bg-white rounded-t-2xl shadow-2xl p-5 md:max-w-2xl md:mx-auto border-t border-gray-200 pb-8 pointer-events-auto">
                         <div className="w-12 h-1 bg-gray-300 rounded-full mx-auto mb-4"></div>
                         <div className="flex justify-between items-start">
                             <h2 className="text-xl font-bold text-gray-900 mb-1">{currentStation.name}</h2>
@@ -622,17 +1079,33 @@ export default function Supercharger() {
                                 <span>{currentStation.address}</span>
                             </div>
                             <div className="flex items-start gap-2">
-                                <i className="fa-solid fa-calendar-check w-4 text-green-500"></i>
-                                <span>{isVisitedThisYear(currentStation.id) ? "今年已踩點 ✅" : "尚未踩點"}</span>
+                                {(() => {
+                                    let d = isVisitedThisYear(currentStation.id)
+                                    return d ? (
+                                        <>
+                                            <i className="fa-solid fa-calendar-check w-4 text-green-500"></i>
+                                            <span>今年已踩點 （{formatDateTime(d, '{M}/{D}')}）</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <i className="fa-solid fa-calendar-check w-4"></i>
+                                            <span>尚未踩點</span>
+                                        </>
+                                    )
+                                })()}
                             </div>
-                            <div className="flex items-start gap-2">
-                                <i className="fa-solid fa-clock w-4 text-blue-500"></i>
-                                <span>{currentStation.hours || '無營業時間資訊'}</span>
-                            </div>
-                            <div className="flex items-start gap-2">
-                                <i className="fa-solid fa-circle-info w-4 text-gray-500"></i>
-                                <span>{currentStation.Notes || '無備註'}</span>
-                            </div>
+                            {currentStation.hours && (
+                                <div className="flex items-start gap-2">
+                                    <i className="fa-solid fa-clock w-4 text-blue-500"></i>
+                                    <span>{currentStation.hours || '無營業時間資訊'}</span>
+                                </div>
+                            )}
+                            {currentStation.Notes && (
+                                <div className="flex items-start gap-2">
+                                    <i className="fa-solid fa-circle-info w-4 text-gray-500"></i>
+                                    <span>{currentStation.Notes || '無備註'}</span>
+                                </div>
+                            )}
                         </div>
                         <div className="grid grid-cols-2 gap-3 mt-6">
                             <button
@@ -643,7 +1116,7 @@ export default function Supercharger() {
                             </button>
                             <button
                                 onClick={toggleCheckin}
-                                className="bg-red-600 text-white py-3 rounded-xl font-medium hover:bg-red-700 transition-colors"
+                                className={`${isVisitedThisYear(currentStation.id) ? "bg-black hover:bg-gray-800" : "bg-red-600 hover:bg-red-700"} text-white py-3 rounded-xl font-medium transition-colors`}
                             >
                                 {isVisitedThisYear(currentStation.id) ? "取消打卡" : "踩點打卡"}
                             </button>
@@ -664,17 +1137,59 @@ export default function Supercharger() {
                                 </button>
                             </div>
                             <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
-                                <div className="relative pl-6 border-l-2 border-blue-200 space-y-6">
-                                    <div className="font-bold text-green-600 mb-4 text-sm">起點: GPS 定位位置</div>
-                                    {routeResult.map((s, i) => (
-                                        <div key={i} className="relative pb-6 pl-6 border-l-2 border-blue-200">
-                                            <div className="absolute -left-[11px] bg-blue-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
-                                                {i + 1}
-                                            </div>
-                                            <div className="font-bold text-gray-800">{s.name}</div>
-                                            <div className="text-xs text-blue-500">預計行駛: {s.travelTime}</div>
+                                <div className="relative pl-6 border-blue-200">
+                                    <div className="relative pl-6 border-l-2 border-blue-200">
+                                        <div className="absolute -left-[11px] bg-green-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
+                                            起
                                         </div>
-                                    ))}
+                                        <div className="font-bold text-gray-800">
+                                            {startLocationInfo?.address || "未知地址"}
+                                        </div>
+                                        <div className="text-xs text-gray-500">
+                                            {startLocationInfo?.lat?.toFixed(5)}, {startLocationInfo?.lng?.toFixed(5)}
+                                        </div>
+                                    </div>
+                                    {routeResult.map((s, i) => {
+                                        let timeDisplay = '';
+                                        if (typeof s.travelTime === 'number') {
+                                            const h = Math.floor(s.travelTime / 60);
+                                            const m = s.travelTime % 60;
+                                            if (h > 0)
+                                                timeDisplay = `${h} 小時`;
+                                            if (m > 0)
+                                                timeDisplay += `${m} 分鐘`;
+                                        }
+                                        return (
+                                            <div key={i} className="relative pl-6 border-l-2 border-blue-200">
+                                                <div className="text-xs text-blue-500 py-3">預計行駛: {timeDisplay}</div>
+                                                <div className="absolute -left-[11px] bg-blue-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
+                                                    {i + 1}
+                                                </div>
+                                                <div className="font-bold text-gray-800">{s.name}</div>
+                                            </div>
+                                        );
+                                    })}
+                                    <div className="relative pl-6 border-l-2 border-blue-200">
+                                        <div className="text-xs text-blue-500 py-3">
+                                            預計行駛: {(() => {
+                                                const h = Math.floor(finalTravelTime / 60);
+                                                const m = finalTravelTime % 60;
+                                                let str = '';
+                                                if (h > 0) str += `${h} 小時`;
+                                                if (m > 0) str += `${m} 分鐘`;
+                                                return str || '0 分鐘';
+                                            })()}
+                                        </div>
+                                        <div className="absolute -left-[11px] bottom-0 bg-red-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
+                                            終
+                                        </div>
+                                        <div className="text-xs text-gray-500">
+                                            {endLocationInfo?.lat.toFixed(5)}, {endLocationInfo?.lng.toFixed(5)}
+                                        </div>
+                                        <div className="font-bold text-gray-800">
+                                            {endLocationInfo?.address || "未知地址"}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                             <div className="p-4 border-t bg-white space-y-2">
@@ -718,7 +1233,7 @@ export default function Supercharger() {
                                             <div className="cursor-pointer flex-1" onClick={() => loadHistoryRoute(item)}>
                                                 <div className="font-bold text-sm text-gray-800">{item.date}</div>
                                                 <div className="text-xs text-gray-500">
-                                                    起點: {item.start.lat.toFixed(3)}, {item.start.lng.toFixed(3)} | 站點數: {item.stations.length}
+                                                    起點: {item.start ? `${item.start.lat.toFixed(3)}, ${item.start.lng.toFixed(3)}` : '未知'} | 站點數: {item.stations ? item.stations.length : 0}
                                                 </div>
                                             </div>
                                             <button
@@ -740,7 +1255,7 @@ export default function Supercharger() {
 }
 
 // Map Component - needs to be separate for react-leaflet hooks
-function MapComponent({ filteredStations, selectedStationIds, isPlanningMode, isVisitedThisYear, onMarkerClick, onMapClick, mapPickTarget }) {
+function MapComponent({ filteredStations, selectedStationIds, isPlanningMode, isVisitedThisYear, onMarkerClick, onMapClick, mapPickTarget, tempPickedCoords, flyToCoords, userLocation, currentStation }) {
     const [L, setL] = useState(null);
     const [isClient, setIsClient] = useState(false);
 
@@ -765,36 +1280,90 @@ function MapComponent({ filteredStations, selectedStationIds, isPlanningMode, is
             onMarkerClick={onMarkerClick}
             onMapClick={onMapClick}
             mapPickTarget={mapPickTarget}
+            tempPickedCoords={tempPickedCoords}
+            flyToCoords={flyToCoords}
+            userLocation={userLocation}
+            currentStation={currentStation}
         />
     );
 }
 
-function MapContainerWrapper({ L, filteredStations, selectedStationIds, isPlanningMode, isVisitedThisYear, onMarkerClick, onMapClick, mapPickTarget }) {
-    const { MapContainer, TileLayer, Marker, useMapEvents } = require('react-leaflet');
+function MapEvents({ mapPickTarget, onMapClick }) {
+    const { useMap, useMapEvents } = require('react-leaflet');
+    const map = useMap();
 
-    const createIcon = (visited, isSelected) => {
+    useEffect(() => {
+        const container = map.getContainer();
+        if (mapPickTarget) {
+            container.classList.remove('leaflet-grab');
+            container.classList.add('cursor-crosshair');
+        } else {
+            container.classList.remove('cursor-crosshair');
+            if (map.dragging.enabled()) {
+                container.classList.add('leaflet-grab');
+            }
+        }
+    }, [mapPickTarget, map]);
+
+    useMapEvents({
+        click: (e) => {
+            onMapClick(e);
+        },
+    });
+    return null;
+}
+
+function FlyToHandler({ coords }) {
+    const { useMap } = require('react-leaflet');
+    const map = useMap();
+    useEffect(() => {
+        if (coords) {
+            map.flyTo([coords.lat, coords.lng], 13, {
+                animate: true,
+                duration: 1.5
+            });
+        }
+    }, [coords, map]);
+    return null;
+}
+
+function MapContainerWrapper({ L, filteredStations, selectedStationIds, isPlanningMode, isVisitedThisYear, onMarkerClick, onMapClick, mapPickTarget, tempPickedCoords, flyToCoords, userLocation, currentStation }) {
+    const { MapContainer, TileLayer, Marker } = require('react-leaflet');
+
+    const createIcon = (visited, isSelected, isCurrent, hasHours) => {
         let cssClass = 'pin';
         if (isSelected) cssClass += ' selected';
         else if (visited) cssClass += ' visited';
 
+        if (isCurrent) cssClass += ' current';
+        
+        let innerHtml = '';
+        if (hasHours) {
+            cssClass += ' has-hours';
+            innerHtml = '<div class="warning-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>';
+        }
+
         return L.divIcon({
             className: 'custom-icon',
-            html: `<div class="${cssClass}"></div>`,
+            html: `<div class="${cssClass}">${innerHtml}</div>`,
             iconSize: [30, 42],
             iconAnchor: [15, 42]
         });
     };
 
-    function MapEvents() {
-        useMapEvents({
-            click: (e) => {
-                if (mapPickTarget) {
-                    onMapClick(e);
-                }
-            },
-        });
-        return null;
-    }
+    const userIcon = L.divIcon({
+        className: 'custom-icon',
+        html: `<div style="width: 16px; height: 16px; background-color: #3b82f6; border: 3px solid white; border-radius: 50%; box-shadow: 0 0 0 2px #3b82f6;"></div>`,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10]
+    });
+
+    const tempIcon = L.divIcon({
+        className: 'custom-icon',
+        html: `<div style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: flex-end; color: #ef4444; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.3));"><i class="fa-solid fa-map-pin" style="font-size: 32px; line-height: 1;"></i></div>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 32]
+    });
 
     return (
         <MapContainer
@@ -802,18 +1371,37 @@ function MapContainerWrapper({ L, filteredStations, selectedStationIds, isPlanni
             zoom={7}
             zoomControl={false}
             style={{ height: '100vh', width: '100vw' }}
-            className={mapPickTarget ? 'cursor-crosshair' : ''}
         >
-            <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
-            <MapEvents />
+            <TileLayer
+                url="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}"
+                attribution='&copy; Google Maps'
+            />
+            <MapEvents mapPickTarget={mapPickTarget} onMapClick={onMapClick} />
+            <FlyToHandler coords={flyToCoords} />
+            {userLocation && (
+                <Marker
+                    position={[userLocation.lat, userLocation.lng]}
+                    icon={userIcon}
+                    zIndexOffset={1000}
+                />
+            )}
+            {tempPickedCoords && (
+                <Marker
+                    position={[tempPickedCoords.lat, tempPickedCoords.lng]}
+                    icon={tempIcon}
+                    zIndexOffset={2000}
+                />
+            )}
             {filteredStations.map((station) => {
                 const visited = isVisitedThisYear(station.id);
                 const isSelected = selectedStationIds.has(station.id);
+                const isCurrent = currentStation && currentStation.id === station.id;
+                const hasHours = !!station.hours;
                 return (
                     <Marker
                         key={station.id}
                         position={[station.lat, station.lng]}
-                        icon={createIcon(visited, isSelected)}
+                        icon={createIcon(visited, isSelected, isCurrent, hasHours)}
                         eventHandlers={{
                             click: (e) => {
                                 L.DomEvent.stopPropagation(e);

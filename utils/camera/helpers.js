@@ -1,4 +1,5 @@
 import { REASON_MAPPING, DEFAULT_CLIP_DURATION } from './constants';
+import { formatDateTime as fmtDT } from '../datetime';
 
 export const formatDuration = (seconds) => {
   if (!seconds && seconds !== 0) return "00:00";
@@ -32,25 +33,9 @@ export const getVideoDuration = (file) => {
   });
 };
 
-export const formatDateTime = (date) => {
-  const y = date.getFullYear();
-  const M = date.getMonth() + 1;
-  const d = date.getDate();
-  const H = date.getHours().toString().padStart(2, '0');
-  const m = date.getMinutes().toString().padStart(2, '0');
-  return `${y}/${M}/${d} ${H}:${m}`;
-};
+export const formatDateTime = (date) => fmtDT(date, '{Y}/{M}/{D} {H}:{m}');
 
-export const formatFullTimestamp = (dateString) => {
-  const date = new Date(dateString);
-  const y = date.getFullYear();
-  const M = date.getMonth() + 1;
-  const d = date.getDate();
-  const H = date.getHours().toString().padStart(2, '0');
-  const m = date.getMinutes().toString().padStart(2, '0');
-  const s = date.getSeconds().toString().padStart(2, '0');
-  return `${y}/${M}/${d} ${H}:${m}:${s}`;
-};
+export const formatFullTimestamp = (dateString) => fmtDT(dateString);
 
 export const formatEventTimeRange = (startDate, endDate) => {
   const startStr = formatDateTime(startDate);
