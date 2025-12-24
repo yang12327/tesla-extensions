@@ -3,6 +3,7 @@ import Head from 'next/head';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { formatDateTime } from '../utils/datetime';
+import MultiSelectDropdown from '../components/MultiSelectDropdown';
 
 const APP_KEY = 'tesla_tracker_v3';
 const HISTORY_KEY = 'tesla_map_history';
@@ -40,9 +41,9 @@ export default function Supercharger() {
     const [mapPickTarget, setMapPickTarget] = useState(null);
     const [tempPickedCoords, setTempPickedCoords] = useState(null);
 
-    const [cityFilterNormal, setCityFilterNormal] = useState('');
+    const [cityFilterNormal, setCityFilterNormal] = useState([]);
     const [hideVisitedNormal, setHideVisitedNormal] = useState(false);
-    const [cityFilterPlanner, setCityFilterPlanner] = useState('');
+    const [cityFilterPlanner, setCityFilterPlanner] = useState([]);
     const [hideVisitedPlanner, setHideVisitedPlanner] = useState(false);
 
     const [detailModalOpen, setDetailModalOpen] = useState(false);
@@ -52,6 +53,7 @@ export default function Supercharger() {
     const [routeResult, setRouteResult] = useState([]);
     const [finalTravelTime, setFinalTravelTime] = useState(0);
     const [historyList, setHistoryList] = useState([]);
+    const [currentHistoryId, setCurrentHistoryId] = useState(null);
     const [loading, setLoading] = useState(false);
 
     const [startInputVal, setStartInputVal] = useState('');
@@ -150,18 +152,19 @@ export default function Supercharger() {
             const displayName = cityMap[city] || city;
             return {
                 value: city,
-                label: `${displayName} （${visited} / ${total}）`
+                label: `${displayName} （${visited} / ${total}）`,
+                name: displayName
             };
         });
     }, [allStations, isVisitedThisYear]);
 
     // Filtered stations
     const filteredStations = useMemo(() => {
-        const city = isPlanningMode ? cityFilterPlanner : cityFilterNormal;
+        const selectedCities = isPlanningMode ? cityFilterPlanner : cityFilterNormal;
         const hide = isPlanningMode ? hideVisitedPlanner : hideVisitedNormal;
 
         return allStations.filter(s => {
-            if (city && s.city !== city) return false;
+            if (selectedCities.length > 0 && !selectedCities.includes(s.city)) return false;
             if (hide && isVisitedThisYear(s.id)) return false;
             return true;
         });
@@ -601,16 +604,12 @@ export default function Supercharger() {
             }
 
             // Calculate final leg time
-            if (currentStationIdx !== -1 && endCoords) {
-                const lastStation = allStations[currentStationIdx];
-                const dist = getDistanceFromLatLonInKm(lastStation.lat, lastStation.lng, endCoords.lat, endCoords.lng);
-                const time = (dist / 50) * 60; // Assume 50km/h average speed
-                setFinalTravelTime(Math.round(time));
-            } else {
-                setFinalTravelTime(0);
-            }
+            const finalTime = calculateFinalLegTime(routeOrder, endCoords);
+            setFinalTravelTime(finalTime);
 
-            saveRouteToHistory(routeOrder, startInfo, endInfo);
+            const totalTime = calculateTotalTime(routeOrder, endCoords);
+            const newId = saveRouteToHistory(routeOrder, startInfo, endInfo, totalTime);
+            setCurrentHistoryId(newId);
             setRouteResult(routeOrder);
             setResultModalOpen(true);
         } catch (err) {
@@ -639,19 +638,41 @@ export default function Supercharger() {
         return deg * (Math.PI / 180)
     }
 
+    // Helper to calculate final leg time
+    const calculateFinalLegTime = (stations, endLocation) => {
+        if (!stations || stations.length === 0 || !endLocation) return 0;
+        const lastStation = stations[stations.length - 1];
+        if (!lastStation.lat || !lastStation.lng || !endLocation.lat || !endLocation.lng) return 0;
+        
+        const dist = getDistanceFromLatLonInKm(lastStation.lat, lastStation.lng, endLocation.lat, endLocation.lng);
+        return Math.round((dist / 50) * 60); // 50km/h
+    };
+
+    // Helper to calculate total trip time
+    const calculateTotalTime = (stations, endLocation) => {
+        if (!stations) return 0;
+        const stationsTime = stations.reduce((acc, s) => acc + (s.travelTime || 0), 0);
+        const finalLegTime = calculateFinalLegTime(stations, endLocation);
+        return stationsTime + finalLegTime;
+    };
+
     // Save route to history
-    const saveRouteToHistory = (routeOrder, startInfo, endInfo) => {
+    const saveRouteToHistory = (routeOrder, startInfo, endInfo, totalTime) => {
         const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+        const dateStr = new Date().toLocaleString();
         const newItem = {
             id: Date.now(),
-            date: new Date().toLocaleString(),
+            title: dateStr,
+            date: dateStr,
             start: startInfo,
             end: endInfo,
-            stations: routeOrder
+            stations: routeOrder,
+            totalTime: totalTime
         };
         history.unshift(newItem);
         if (history.length > 20) history.pop();
         localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+        return newItem.id;
     };
 
     // Open history modal
@@ -667,6 +688,17 @@ export default function Supercharger() {
         history.splice(index, 1);
         localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
         setHistoryList(history);
+    };
+
+    // Update history title
+    const updateHistoryTitle = (id, newTitle) => {
+        const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+        const index = history.findIndex(item => item.id === id);
+        if (index !== -1) {
+            history[index].title = newTitle;
+            localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+            setHistoryList(history);
+        }
     };
 
     // Load history route
@@ -687,6 +719,11 @@ export default function Supercharger() {
             setEndLocationInfo(item.start || null);
         }
 
+        // Calculate final leg time dynamically
+        const finalTime = calculateFinalLegTime(item.stations, item.end);
+        setFinalTravelTime(finalTime);
+
+        setCurrentHistoryId(item.id);
         setRouteResult(item.stations || []);
         setResultModalOpen(true);
         setHistoryModalOpen(false);
@@ -828,16 +865,14 @@ export default function Supercharger() {
 
                         {/* Filter Section (Normal) */}
                         <div className="flex gap-2 items-center text-sm pt-1 border-t border-gray-100">
-                            <select
-                                value={cityFilterNormal}
-                                onChange={(e) => setCityFilterNormal(e.target.value)}
-                                className="border rounded px-2 py-1 bg-white text-gray-700 flex-1"
-                            >
-                                <option value="">所有縣市</option>
-                                {cities.map(c => (
-                                    <option key={c.value} value={c.value}>{c.label}</option>
-                                ))}
-                            </select>
+                            <div className="flex-1 min-w-0">
+                                <MultiSelectDropdown
+                                    options={cities}
+                                    selectedValues={cityFilterNormal}
+                                    onChange={setCityFilterNormal}
+                                    placeholder="所有縣市"
+                                />
+                            </div>
                             <label className="flex items-center gap-1 cursor-pointer select-none text-gray-600">
                                 <input
                                     type="checkbox"
@@ -873,16 +908,14 @@ export default function Supercharger() {
 
                         {/* Filter Section (Planner) */}
                         <div className="flex gap-2 items-center text-sm mb-3">
-                            <select
-                                value={cityFilterPlanner}
-                                onChange={(e) => setCityFilterPlanner(e.target.value)}
-                                className="border rounded px-2 py-1 bg-white text-gray-700 flex-1"
-                            >
-                                <option value="">全部縣市</option>
-                                {cities.map(c => (
-                                    <option key={c.value} value={c.value}>{c.label}</option>
-                                ))}
-                            </select>
+                            <div className="flex-1 min-w-0">
+                                <MultiSelectDropdown
+                                    options={cities}
+                                    selectedValues={cityFilterPlanner}
+                                    onChange={setCityFilterPlanner}
+                                    placeholder="全部縣市"
+                                />
+                            </div>
                             <label className="flex items-center gap-1 cursor-pointer select-none text-gray-600">
                                 <input
                                     type="checkbox"
@@ -1129,9 +1162,30 @@ export default function Supercharger() {
                     <div className="fixed inset-0 z-[3000] bg-black/50 flex items-end md:items-center justify-center">
                         <div className="bg-white w-full h-[80vh] md:h-auto md:max-h-[80vh] md:max-w-lg md:rounded-2xl rounded-t-2xl flex flex-col shadow-2xl">
                             <div className="p-4 border-b flex justify-between items-center">
-                                <h2 className="font-bold text-lg text-blue-700">
-                                    <i className="fa-solid fa-clock mr-2"></i>時間優先排程結果
-                                </h2>
+                                <div className="flex-1 mr-4">
+                                    <input 
+                                        type="text" 
+                                        className="w-full border rounded px-2 py-1 text-base font-bold text-blue-700 focus:outline-none focus:border-blue-500"
+                                        defaultValue={(() => {
+                                            if (typeof window === 'undefined' || !currentHistoryId) return new Date().toLocaleString();
+                                            const history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+                                            const item = history.find(h => h.id === currentHistoryId);
+                                            return item ? (item.title || item.date) : new Date().toLocaleString();
+                                        })()}
+                                        onBlur={(e) => currentHistoryId && updateHistoryTitle(currentHistoryId, e.target.value)}
+                                    />
+                                    <div className="text-xs text-blue-600 mt-1">
+                                        總行程時間：{(() => {
+                                            const totalMinutes = calculateTotalTime(routeResult, endLocationInfo);
+                                            const h = Math.floor(totalMinutes / 60);
+                                            const m = totalMinutes % 60;
+                                            let str = '';
+                                            if (h > 0) str += ` ${h} 小時`;
+                                            if (m > 0) str += ` ${m} 分鐘`;
+                                            return str || '0 分鐘';
+                                        })()}
+                                    </div>
+                                </div>
                                 <button onClick={() => setResultModalOpen(false)} className="text-gray-500">
                                     <i className="fa-solid fa-xmark fa-lg"></i>
                                 </button>
@@ -1155,13 +1209,13 @@ export default function Supercharger() {
                                             const h = Math.floor(s.travelTime / 60);
                                             const m = s.travelTime % 60;
                                             if (h > 0)
-                                                timeDisplay = `${h} 小時`;
+                                                timeDisplay = ` ${h} 小時`;
                                             if (m > 0)
-                                                timeDisplay += `${m} 分鐘`;
+                                                timeDisplay += ` ${m} 分鐘`;
                                         }
                                         return (
                                             <div key={i} className="relative pl-6 border-l-2 border-blue-200">
-                                                <div className="text-xs text-blue-500 py-3">預計行駛: {timeDisplay}</div>
+                                                <div className="text-xs text-blue-500 py-3">預計行駛：{timeDisplay}</div>
                                                 <div className="absolute -left-[11px] bg-blue-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center">
                                                     {i + 1}
                                                 </div>
@@ -1171,12 +1225,12 @@ export default function Supercharger() {
                                     })}
                                     <div className="relative pl-6 border-l-2 border-blue-200">
                                         <div className="text-xs text-blue-500 py-3">
-                                            預計行駛: {(() => {
+                                            預計行駛：{(() => {
                                                 const h = Math.floor(finalTravelTime / 60);
                                                 const m = finalTravelTime % 60;
                                                 let str = '';
-                                                if (h > 0) str += `${h} 小時`;
-                                                if (m > 0) str += `${m} 分鐘`;
+                                                if (h > 0) str += ` ${h} 小時`;
+                                                if (m > 0) str += ` ${m} 分鐘`;
                                                 return str || '0 分鐘';
                                             })()}
                                         </div>
@@ -1231,9 +1285,31 @@ export default function Supercharger() {
                                             className="bg-white p-3 rounded-lg border shadow-sm flex justify-between items-center"
                                         >
                                             <div className="cursor-pointer flex-1" onClick={() => loadHistoryRoute(item)}>
-                                                <div className="font-bold text-sm text-gray-800">{item.date}</div>
-                                                <div className="text-xs text-gray-500">
-                                                    起點: {item.start ? `${item.start.lat.toFixed(3)}, ${item.start.lng.toFixed(3)}` : '未知'} | 站點數: {item.stations ? item.stations.length : 0}
+                                                <div className="font-bold text-sm text-gray-800 mb-1">{item.title || item.date}</div>
+                                                <div className="text-xs text-gray-600 mb-1">
+                                                    <span className="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded mr-2">
+                                                        {item.stations ? item.stations.length : 0} 站
+                                                    </span>
+                                                    <span className="text-gray-500">
+                                                        {(() => {
+                                                            const totalTime = calculateTotalTime(item.stations, item.end);
+                                                            if (!totalTime) return '未計算時間';
+                                                            const h = Math.floor(totalTime / 60);
+                                                            const m = totalTime % 60;
+                                                            let str = '';
+                                                            if (h > 0) str += ` ${h} 小時`;
+                                                            if (m > 0) str += ` ${m} 分鐘`;
+                                                            return str || '0 分鐘';
+                                                        })()}
+                                                    </span>
+                                                </div>
+                                                <div className="text-xs text-gray-500 truncate">
+                                                    <i className="fa-solid fa-location-dot text-green-600 mr-1"></i>
+                                                    {item.start?.address || (item.start ? `${item.start.lat.toFixed(3)}, ${item.start.lng.toFixed(3)}` : '未知')}
+                                                </div>
+                                                <div className="text-xs text-gray-500 truncate">
+                                                    <i className="fa-solid fa-location-dot text-red-600 mr-1"></i>
+                                                    {item.end?.address || (item.end ? `${item.end.lat.toFixed(3)}, ${item.end.lng.toFixed(3)}` : '未知')}
                                                 </div>
                                             </div>
                                             <button
