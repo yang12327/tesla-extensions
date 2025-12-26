@@ -248,19 +248,31 @@ export default function Supercharger() {
     // Update input values when coords change
     useEffect(() => {
         if (routeStartCoords) {
-            setStartInputVal(`${routeStartCoords.lat.toFixed(5)}, ${routeStartCoords.lng.toFixed(5)}`);
+            if (startLocationInfo && startLocationInfo.address && 
+                Math.abs(startLocationInfo.lat - routeStartCoords.lat) < 0.00001 && 
+                Math.abs(startLocationInfo.lng - routeStartCoords.lng) < 0.00001) {
+                setStartInputVal(startLocationInfo.address);
+            } else {
+                setStartInputVal(`${routeStartCoords.lat.toFixed(5)}, ${routeStartCoords.lng.toFixed(5)}`);
+            }
         } else {
             setStartInputVal('');
         }
-    }, [routeStartCoords]);
+    }, [routeStartCoords, startLocationInfo]);
 
     useEffect(() => {
         if (routeEndCoords) {
-            setEndInputVal(`${routeEndCoords.lat.toFixed(5)}, ${routeEndCoords.lng.toFixed(5)}`);
+            if (endLocationInfo && endLocationInfo.address && 
+                Math.abs(endLocationInfo.lat - routeEndCoords.lat) < 0.00001 && 
+                Math.abs(endLocationInfo.lng - routeEndCoords.lng) < 0.00001) {
+                setEndInputVal(endLocationInfo.address);
+            } else {
+                setEndInputVal(`${routeEndCoords.lat.toFixed(5)}, ${routeEndCoords.lng.toFixed(5)}`);
+            }
         } else {
             setEndInputVal('');
         }
-    }, [routeEndCoords]);
+    }, [routeEndCoords, endLocationInfo]);
 
     // Fetch suggestions
     const fetchSuggestions = async (query, setSuggestions) => {
@@ -699,6 +711,19 @@ export default function Supercharger() {
             localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
             setHistoryList(history);
         }
+    };
+
+    // Edit route
+    const editRoute = () => {
+        setIsPlanningMode(true);
+        
+        const newSelected = new Set();
+        routeResult.forEach(s => {
+            if (s.id) newSelected.add(s.id);
+        });
+        setSelectedStationIds(newSelected);
+        
+        setResultModalOpen(false);
     };
 
     // Load history route
@@ -1247,6 +1272,13 @@ export default function Supercharger() {
                                 </div>
                             </div>
                             <div className="p-4 border-t bg-white space-y-2">
+                                <button
+                                    onClick={editRoute}
+                                    className="block w-full bg-gray-600 text-white text-center font-bold py-3 rounded-xl shadow-lg mb-2 hover:bg-gray-700 transition"
+                                >
+                                    <i className="fa-solid fa-pen-to-square mr-2"></i>
+                                    編輯行程
+                                </button>
                                 {googleMapsLinks.map((link, i) => (
                                     <a
                                         key={i}
