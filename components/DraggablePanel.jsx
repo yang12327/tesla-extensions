@@ -22,27 +22,55 @@ export default function DraggablePanel({ children, className = '', defaultPositi
     // e.preventDefault(); // Prevent text selection etc.
   };
 
+  const handleTouchStart = (e) => {
+    const touch = e.touches[0];
+    const rect = panelRef.current.getBoundingClientRect();
+    setDragOffset({
+      x: touch.clientX - rect.left,
+      y: touch.clientY - rect.top
+    });
+    
+    setPosition({ x: rect.left, y: rect.top });
+    setIsDragging(true);
+    
+    e.stopPropagation();
+  };
+
   useEffect(() => {
-    const handleMouseMove = (e) => {
+    const handleMove = (e) => {
       if (!isDragging) return;
+      
+      let clientX, clientY;
+      if (e.type === 'touchmove') {
+         clientX = e.touches[0].clientX;
+         clientY = e.touches[0].clientY;
+      } else {
+         clientX = e.clientX;
+         clientY = e.clientY;
+      }
+
       setPosition({
-        x: e.clientX - dragOffset.x,
-        y: e.clientY - dragOffset.y
+        x: clientX - dragOffset.x,
+        y: clientY - dragOffset.y
       });
     };
 
-    const handleMouseUp = () => {
+    const handleUp = () => {
       setIsDragging(false);
     };
 
     if (isDragging) {
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+      window.addEventListener('touchmove', handleMove, { passive: false });
+      window.addEventListener('touchend', handleUp);
     }
 
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+      window.removeEventListener('touchmove', handleMove);
+      window.removeEventListener('touchend', handleUp);
     };
   }, [isDragging, dragOffset]);
 
@@ -54,6 +82,7 @@ export default function DraggablePanel({ children, className = '', defaultPositi
     <div
       ref={panelRef}
       onMouseDown={handleMouseDown}
+      onTouchStart={handleTouchStart}
       className={className}
       style={style}
     >
