@@ -1,9 +1,12 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
-import { Play, Pause, SkipBack, SkipForward, FolderOpen, Video, Clock, Eye, EyeOff, FastForward, Loader2, AlertCircle, Image as ImageIcon, RotateCcw, MapPin, ChevronLeft, Camera } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, FolderOpen, Video, Clock, Eye, EyeOff, FastForward, Loader2, AlertCircle, Image as ImageIcon, RotateCcw, MapPin, ChevronLeft, Camera, Info } from 'lucide-react';
 import { CAMERA_SETTINGS, CAMERA_INDEX_MAP, PLAYBACK_RATES, DEFAULT_CLIP_DURATION } from '../utils/camera/constants';
 import { formatDuration, parseTeslaTimestamp, getReasonLabel, getVideoDuration, formatFullTimestamp, formatEventTimeRange } from '../utils/camera/helpers';
+import { extractSeiFromFile, getSeiAtTime, formatSeiData } from '../utils/camera/seiParser';
 import Tooltip from '../components/Tooltip';
+import SeiDataPanel, { SpeedDisplay } from '../components/SeiDataPanel';
+import DraggablePanel from '../components/DraggablePanel';
 
 // --- Component ---
 
@@ -33,13 +36,23 @@ export default function TeslaSentryViewer() {
   const [activeVideoUrls, setActiveVideoUrls] = useState({});
   const [mainCameraReady, setMainCameraReady] = useState(false);
 
+  // SEI 狀態
+  const [seiData, setSeiData] = useState({});  // { clipIndex: [seiMessages] }
+  const [currentSei, setCurrentSei] = useState(null);
+  const [showSeiPanel, setShowSeiPanel] = useState(false);
+  const [loadingSei, setLoadingSei] = useState(false);
+  const [seiPanelPosition, setSeiPanelPosition] = useState(null);
+
   // 2. Refs
   const fileInputRef = useRef(null);
   const videoRefs = useRef({});
+  const mainVideoContainerRef = useRef(null);
   const animationFrameRef = useRef(null);
   const blobCacheRef = useRef({});
   const isPlayingRef = useRef(false);
   const stallCountersRef = useRef({});
+  const seiCacheRef = useRef({});  // SEI 資料快取
+  const loadingSeiRef = useRef({}); // SEI 載入狀態快取
 
   // 3. Initialization Effects
   useEffect(() => {
@@ -126,6 +139,22 @@ export default function TeslaSentryViewer() {
     const keys = Object.keys(CAMERA_SETTINGS);
     return keys.sort((a, b) => CAMERA_SETTINGS[a].sortView - CAMERA_SETTINGS[b].sortView);
   }, []);
+
+  // 4.5. SEI 資料更新 Effect
+  useEffect(() => {
+    if (!selectedEvent || !seiData[currentClipIndex]) {
+      setCurrentSei(null);
+      return;
+    }
+
+    const seiMessages = seiData[currentClipIndex];
+    const formattedSei = getSeiAtTime(seiMessages, localTime, 36);
+    if (formattedSei) {
+      setCurrentSei(formatSeiData(formattedSei));
+    } else {
+      setCurrentSei(null);
+    }
+  }, [localTime, currentClipIndex, selectedEvent, seiData]);
 
   // 5. Duration Analysis Effect
   useEffect(() => {
@@ -386,6 +415,47 @@ export default function TeslaSentryViewer() {
     return urls;
   }, []);
 
+  // --- SEI 資料載入 ---
+  const loadClipSei = useCallback(async (event, index) => {
+    if (!event || !event.clips[index]) return;
+    const cacheKey = `${event.id}_${index}`;
+
+    if (seiCacheRef.current[cacheKey]) {
+      setSeiData(prev => ({ ...prev, [index]: seiCacheRef.current[cacheKey] }));
+      return;
+    }
+
+    if (loadingSeiRef.current[cacheKey]) return;
+    loadingSeiRef.current[cacheKey] = true;
+
+    const clip = event.clips[index];
+    // 優先使用 front 攝影機的影片來提取 SEI
+    const videoFile = clip.videos['front'] || Object.values(clip.videos)[0];
+    if (!videoFile) {
+      loadingSeiRef.current[cacheKey] = false;
+      return;
+    }
+
+    try {
+      const seiMessages = await extractSeiFromFile(videoFile);
+      if (seiMessages && seiMessages.length > 0) {
+        seiCacheRef.current[cacheKey] = seiMessages;
+        setSeiData(prev => ({ ...prev, [index]: seiMessages }));
+      }
+    } catch (e) {
+      console.error('Error loading SEI data:', e);
+    } finally {
+      loadingSeiRef.current[cacheKey] = false;
+    }
+  }, []);
+
+  // HMR Recovery: Ensure SEI data is loaded if it's missing but we have a selected event
+  useEffect(() => {
+    if (selectedEvent && !seiData[currentClipIndex]) {
+      loadClipSei(selectedEvent, currentClipIndex);
+    }
+  }, [selectedEvent, currentClipIndex, seiData, loadClipSei]);
+
   const unloadClipBlobs = useCallback((index) => {
     if (blobCacheRef.current[index]) {
       Object.values(blobCacheRef.current[index]).forEach(url => URL.revokeObjectURL(url));
@@ -436,15 +506,20 @@ export default function TeslaSentryViewer() {
     const currentUrls = loadClipBlobs(evt, currentClipIndex);
     setActiveVideoUrls(currentUrls || {});
 
+    // 載入當前片段的 SEI 資料
+    loadClipSei(evt, currentClipIndex);
+
     if (currentClipIndex < evt.clips.length - 1) {
       loadClipBlobs(evt, currentClipIndex + 1);
+      // 預載入下一片段的 SEI
+      loadClipSei(evt, currentClipIndex + 1);
     }
 
     if (currentClipIndex >= 2) {
       unloadClipBlobs(currentClipIndex - 2);
     }
 
-  }, [currentClipIndex, selectedEventId, events, loadClipBlobs, unloadClipBlobs, mainCamera]);
+  }, [currentClipIndex, selectedEventId, events, loadClipBlobs, unloadClipBlobs, mainCamera, loadClipSei]);
 
   useEffect(() => {
     if (!selectedEventId) return;
@@ -466,6 +541,13 @@ export default function TeslaSentryViewer() {
       Object.keys(blobCacheRef.current).forEach(idx => unloadClipBlobs(idx));
     };
   }, [selectedEventId, unloadClipBlobs]);
+
+  // 清除 SEI 快取（當切換事件時）
+  useEffect(() => {
+    setSeiData({});
+    setCurrentSei(null);
+    // 保留全域 seiCacheRef 以避免重複載入
+  }, [selectedEventId]);
 
 
   // --- Player Core Functions ---
@@ -791,6 +873,23 @@ export default function TeslaSentryViewer() {
     }
   };
 
+  useEffect(() => {
+    if (mainVideoContainerRef.current) {
+      const updatePosition = () => {
+        const rect = mainVideoContainerRef.current.getBoundingClientRect();
+        setSeiPanelPosition({
+          top: rect.top + 20,
+          left: rect.left + rect.width / 2,
+          transform: 'translateX(-50%)'
+        });
+      };
+      
+      updatePosition();
+      window.addEventListener('resize', updatePosition);
+      return () => window.removeEventListener('resize', updatePosition);
+    }
+  }, [showMobileList, selectedEventId]);
+
   return (
     <div className="flex h-screen bg-gray-100 dark:bg-[#232629] text-gray-900 dark:text-zinc-200 font-sans overflow-hidden transition-colors duration-300">
       <style>{`
@@ -828,6 +927,24 @@ export default function TeslaSentryViewer() {
             top: -28px; 
             margin-top: -8px; 
             z-index: 50; 
+        }
+        .blinker-blink {
+          animation: blinker-blink 0.8s linear infinite;
+        }
+        @keyframes blinker-blink {
+          0% {
+            color: var(--color-green-400);
+          }
+          49% {
+            color: var(--color-green-400);
+          }
+
+          50% {
+            color: var(--color-green-700);
+          }
+          100% {
+            color: var(--color-green-700);
+          }
         }
       `}</style>
 
@@ -921,7 +1038,7 @@ export default function TeslaSentryViewer() {
       <div className={`flex-col h-full relative bg-gray-50 dark:bg-[#232629]
           ${!showMobileList ? 'flex w-full' : 'hidden'} 
           md:flex md:flex-1 transition-colors duration-300`}>
- 
+
         {!selectedEvent ? (
           <div className="flex-1 flex flex-col items-center justify-center text-gray-400 dark:text-zinc-600">
             <Video size={64} className="mb-4 opacity-20" />
@@ -958,7 +1075,7 @@ export default function TeslaSentryViewer() {
             {/* Video Area */}
             <div className="flex-1 bg-black relative p-2 overflow-hidden flex flex-col items-center justify-center">
               {/* Main View */}
-              <div className="w-full max-h-full aspect-[4/3] relative flex items-center justify-center mb-2 rounded overflow-hidden bg-black border border-gray-800 dark:border-[#313438] shrink-1">
+              <div ref={mainVideoContainerRef} className="w-full max-h-full aspect-[4/3] relative flex items-center justify-center mb-2 rounded overflow-hidden bg-black border border-gray-800 dark:border-[#313438] shrink-1">
                 {isBuffering && (
                   <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
                     <Loader2 className="w-10 h-10 text-red-500 animate-spin mb-2" />
@@ -989,6 +1106,8 @@ export default function TeslaSentryViewer() {
                 <div className="absolute top-4 left-4 bg-black/20 px-2 py-1 rounded-full text-xs text-white uppercase font-bold tracking-wider text-shadow-light">
                   {CAMERA_SETTINGS[mainCamera]?.name || mainCamera}
                 </div>
+
+
               </div>
 
               {/* Sub Views */}
@@ -1085,6 +1204,21 @@ export default function TeslaSentryViewer() {
           </>
         )}
       </div>
+
+      {/* Draggable SEI Panel */}
+      {currentSei && currentSei.vehicleSpeedMps && (
+        <DraggablePanel defaultPosition={seiPanelPosition || { top: '15%', left: '50%', transform: 'translateX(-50%)' }}>
+          <button type='button' onClick={() => setShowSeiPanel(prev => !prev)}
+            className="bg-black/70 rounded-lg p-1 text-white text-xs w-[200px] text-left shadow-lg">
+            <SpeedDisplay seiData={currentSei} more={showSeiPanel} />
+
+            {/* SEI Data Panel - 車輛狀態顯示 */}
+            {showSeiPanel && currentSei && (
+              <SeiDataPanel seiData={currentSei} />
+            )}
+          </button>
+        </DraggablePanel>
+      )}
     </div>
   );
 }

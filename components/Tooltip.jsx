@@ -40,7 +40,7 @@ const Tooltip = ({ content, children, className = '' }) => {
       </span>
       {mounted && isVisible && createPortal(
         <div
-          className="fixed z-[9999] px-2 py-1 text-xs text-white bg-[#313438]/95 
+          className="fixed whitespace-pre z-[9999] px-2 py-1 text-xs text-white bg-[#313438]/95 
                                rounded-md shadow-lg pointer-events-none transform -translate-x-1/2 -translate-y-full"
           style={{ left: coords.left, top: coords.top }}
         >
